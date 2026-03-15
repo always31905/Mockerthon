@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1A1A2E">
+
+    <!-- 테두리 깜빡임 오버레이 (FAST 상태 주황 blink) -->
+    <View
+        android:id="@+id/borderView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/border_overlay"
+        android:alpha="0" />
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="24dp">
+
+        <!-- 상단: 캘리브레이션 버튼 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnCalibrate"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎙 기준 목소리 설정"
+            android:textSize="12sp"
+            app:strokeColor="#FFFFFF"
+            app:strokeWidth="1dp"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:textColor="#FFFFFF"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- 중앙: WPM 큰 숫자 -->
+        <TextView
+            android:id="@+id/tvWpm"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="- WPM"
+            android:textSize="72sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:fontFamily="sans-serif-light"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_marginBottom="32dp" />
+
+        <!-- 속도 상태 레이블 -->
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="발표 준비 완료"
+            android:textSize="22sp"
+            android:textColor="#CCFFFFFF"
+            app:layout_constraintTop_toBottomOf="@id/tvWpm"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_marginTop="8dp" />
+
+        <!-- 자신감 / 떨림 인디케이터 -->
+        <LinearLayout
+            android:id="@+id/layoutVoice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            app:layout_constraintTop_toBottomOf="@id/tvStatus"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_marginTop="20dp">
+
+            <TextView
+                android:id="@+id/tvConfidence"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="자신감 --%"
+                android:textSize="16sp"
+                android:textColor="#A5D6A7"
+                android:paddingEnd="24dp" />
+
+            <TextView
+                android:id="@+id/tvTremor"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="떨림 --%"
+                android:textSize="16sp"
+                android:textColor="#EF9A9A" />
+        </LinearLayout>
+
+        <!-- 하단 버튼 영역 -->
+        <LinearLayout
+            android:id="@+id/layoutButtons"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_marginBottom="40dp">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStart"
+                android:layout_width="140dp"
+                android:layout_height="56dp"
+                android:text="▶ 발표 시작"
+                android:textSize="16sp"
+                android:backgroundTint="#4CAF50"
+                android:layout_marginEnd="16dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStop"
+                android:layout_width="140dp"
+                android:layout_height="56dp"
+                android:text="■ 발표 종료"
+                android:textSize="16sp"
+                android:backgroundTint="#F44336"
+                android:enabled="false" />
+        </LinearLayout>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+</FrameLayout>
