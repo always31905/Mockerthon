@@ -1,171 +1,167 @@
 package com.speechcoach.analysis
 
 import android.content.Context
-import android.util.Log
-import org.tensorflow.lite.Interpreter
-import java.io.FileInputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
+import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.sqrt
 
 /**
- * VoiceAnalysisModel — TFLite 입력 타입 수정
+ * VoiceAnalysisModel (규칙 기반으로 완전 교체)
  *
- * [문제] INT8 양자화 모델에 Float32(4byte) 버퍼를 넣어서 크기 불일치 발생.
- *       "with 30 bytes from a Java Buffer with 120 bytes"
- *       → 모델 기대: 15프레임 × 2피처 × 1byte(INT8) = 30 bytes
- *       → 실제 전달: 15프레임 × 2피처 × 4byte(Float32) = 120 bytes
+ * ── 교체 이유 ────────────────────────────────────────────────────
+ * 기존 TFLite 1D-CNN 모델은 실제 사람 목소리가 아닌
+ * 더미 데이터(난수)로 학습되어 실질적인 떨림 감지가 불가능했음.
  *
- * [해결 1] Float32 모델 사용 (양자화 없이 변환한 경우) → Float32 버퍼 유지
- * [해결 2] INT8 모델 사용 (양자화한 경우) → INT8 ByteBuffer로 변환
+ * ── 새 방식: CalibrationManager 기준점 기반 규칙 분석 ────────────
  *
- * train_voice_model.py에서 양자화 없이 변환한 경우가 많으므로
- * 기본값을 Float32 모드로 설정하고, 오류 발생 시 INT8 모드로 폴백.
+ * [떨림 점수]
+ *   핵심 지표: Pitch 표준편차 (음높이 흔들림 정도)
+ *   - 캘리브레이션에서 측정한 사용자 고유 baselinePitchStd 대비
+ *     현재 윈도우의 Pitch 표준편차가 몇 배인지로 판정
+ *   - 추가 지표: Jitter (연속 프레임 간 Pitch 변화량 평균)
+ *   - 두 지표를 가중 합산 → 0~100%
+ *
+ * [자신감 점수]
+ *   - 볼륨(RMS dB)이 기준치 대비 얼마나 안정적인지
+ *   - Pitch가 정상 발화 범위(80~400Hz) 안에서 얼마나 유지되는지
+ *   - 묵음 비율(Pitch = -1)이 얼마나 적은지
+ *
+ * ── 캘리브레이션 없을 때 폴백 ────────────────────────────────────
+ *   절대값 기준으로 동작 (baselinePitchStd = 20Hz 가정)
  */
 class VoiceAnalysisModel(private val context: Context) {
 
     companion object {
-        private const val TAG             = "VoiceAnalysisModel"
-        private const val MODEL_FILENAME  = "voice_analysis.tflite"
-        private const val INPUT_FEATURES  = 2  // rms + pitch
+        // 캘리브레이션 없을 때 사용하는 기본 기준값
+        private const val DEFAULT_BASELINE_PITCH_STD = 20f  // Hz
+        private const val DEFAULT_BASELINE_RMS_DB    = -30f // dB
+
+        // 떨림 판정 배수 (기준 Std의 몇 배 이상이면 떨림으로 볼 것인가)
+        private const val TREMOR_MILD_MULTIPLIER   = 1.5f  // 1.5배: 경미한 떨림
+        private const val TREMOR_SEVERE_MULTIPLIER = 3.0f  // 3.0배: 심한 떨림
+
+        // 정상 Pitch 범위 (Hz)
+        private const val PITCH_MIN_NORMAL = 80f
+        private const val PITCH_MAX_NORMAL = 400f
     }
 
-    private var interpreter: Interpreter? = null
-    private var useInt8Input = false   // 모델 로드 후 입력 타입 자동 감지
+    private lateinit var calibManager: CalibrationManager
 
+    // TFLite interpreter 대신 CalibrationManager만 필요
     fun load(): Boolean {
-        return try {
-            val options = Interpreter.Options().apply {
-                numThreads = 2
-                useNNAPI   = false
-            }
-            interpreter = Interpreter(loadModelFile(), options)
-
-            // 입력 텐서 타입 확인 → INT8이면 useInt8Input = true
-            val inputTensor = interpreter!!.getInputTensor(0)
-            useInt8Input = (inputTensor.dataType() == org.tensorflow.lite.DataType.INT8)
-            Log.d(TAG, "TFLite 모델 로드 완료 | 입력타입=${inputTensor.dataType()} | INT8모드=$useInt8Input")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "TFLite 모델 로드 실패: ${e.message}")
-            false
-        }
+        calibManager = CalibrationManager(context)
+        return true  // 항상 성공 (모델 파일 불필요)
     }
 
+    /**
+     * 규칙 기반 분석 실행
+     *
+     * @param rmsArray   RMS dB 배열 (3초 윈도우)
+     * @param pitchArray Pitch Hz 배열 (-1 = 묵음)
+     * @return VoiceAnalysisResult
+     */
     fun analyze(rmsArray: FloatArray, pitchArray: FloatArray): VoiceAnalysisResult {
-        val interp = interpreter ?: return VoiceAnalysisResult.empty()
         val windowSize = minOf(rmsArray.size, pitchArray.size)
-        if (windowSize == 0) return VoiceAnalysisResult.empty()
+        if (windowSize < 3) return VoiceAnalysisResult.empty()
 
-        return try {
-            if (useInt8Input) {
-                runInt8(interp, rmsArray, pitchArray, windowSize)
-            } else {
-                runFloat32(interp, rmsArray, pitchArray, windowSize)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "TFLite 추론 오류: ${e.message}")
-            VoiceAnalysisResult.empty()
-        }
-    }
+        // 묵음(-1) 제외한 유효 Pitch만 추출
+        val validPitches = pitchArray.filter { it > 0 }
+        if (validPitches.isEmpty()) return VoiceAnalysisResult.empty()
 
-    // ── Float32 추론 (양자화 없는 모델) ──────────────────────────
-    private fun runFloat32(
-        interp: Interpreter,
-        rmsArray: FloatArray,
-        pitchArray: FloatArray,
-        windowSize: Int
-    ): VoiceAnalysisResult {
-        // [1, windowSize, 2] × Float32(4byte)
-        val inputBuffer = ByteBuffer
-            .allocateDirect(windowSize * INPUT_FEATURES * 4)
-            .order(ByteOrder.nativeOrder())
+        val baseline = calibManager    // 캘리브레이션 완료 여부와 무관하게 사용
 
-        for (i in 0 until windowSize) {
-            inputBuffer.putFloat(normalizeRms(rmsArray[i]))
-            inputBuffer.putFloat(normalizePitch(pitchArray[i]))
-        }
-        inputBuffer.rewind()
+        // ── 1. Pitch 표준편차 계산 ────────────────────────────────
+        val pitchStd    = standardDeviation(validPitches)
+        val baselineStd = if (calibManager.isCalibrated && calibManager.baselinePitchStd > 0)
+            calibManager.baselinePitchStd else DEFAULT_BASELINE_PITCH_STD
 
-        val output = Array(1) { FloatArray(2) }
-        interp.run(inputBuffer, output)
+        // ── 2. Jitter 계산 (연속 프레임 간 Pitch 변화량 평균) ──────
+        // 음높이가 갑자기 튀는 정도 → 떨림의 직접적 지표
+        val jitter = if (validPitches.size >= 2) {
+            validPitches.zipWithNext()
+                .map { (a, b) -> abs(b - a) }
+                .average().toFloat()
+        } else 0f
 
-        return toResult(output[0][0], output[0][1], windowSize)
-    }
+        // ── 3. 떨림 점수 계산 (0~100) ────────────────────────────
+        // pitchStd/baselineStd: 기준 대비 배수 (1.0 = 기준과 동일)
+        val stdRatio    = (pitchStd / baselineStd).coerceIn(0f, TREMOR_SEVERE_MULTIPLIER)
+        // jitter 정규화: 50Hz 이상이면 최대 떨림으로 간주
+        val jitterScore = (jitter / 50f).coerceIn(0f, 1f)
 
-    // ── INT8 추론 (양자화 모델) ───────────────────────────────────
-    private fun runInt8(
-        interp: Interpreter,
-        rmsArray: FloatArray,
-        pitchArray: FloatArray,
-        windowSize: Int
-    ): VoiceAnalysisResult {
-        // [1, windowSize, 2] × INT8(1byte)
-        // Float 0~1 → INT8 범위 -128~127 로 스케일
-        val inputBuffer = ByteBuffer
-            .allocateDirect(windowSize * INPUT_FEATURES)
-            .order(ByteOrder.nativeOrder())
+        // 표준편차 비율 70% + Jitter 30% 가중 합산
+        val rawTremor   = (stdRatio / TREMOR_SEVERE_MULTIPLIER) * 0.7f + jitterScore * 0.3f
+        val tremorPercent = (rawTremor * 100).toInt().coerceIn(0, 100)
 
-        for (i in 0 until windowSize) {
-            val rmsNorm   = normalizeRms(rmsArray[i])
-            val pitchNorm = normalizePitch(pitchArray[i])
-            inputBuffer.put(floatToInt8(rmsNorm))
-            inputBuffer.put(floatToInt8(pitchNorm))
-        }
-        inputBuffer.rewind()
+        // ── 4. 자신감 점수 계산 (0~100) ──────────────────────────
 
-        // INT8 출력 텐서
-        val outputBuffer = ByteBuffer
-            .allocateDirect(2)
-            .order(ByteOrder.nativeOrder())
-        interp.run(inputBuffer, outputBuffer)
-        outputBuffer.rewind()
+        // (a) 볼륨 안정성: RMS의 표준편차가 작을수록 안정적 → 자신감 높음
+        val validRms    = rmsArray.filter { it > -80f }
+        val rmsStd      = if (validRms.size >= 2) standardDeviation(validRms) else 20f
+        // rmsStd 0dB → 100%, 20dB → 0%
+        val rmsStability = (1f - (rmsStd / 20f)).coerceIn(0f, 1f)
 
-        val conf   = int8ToFloat(outputBuffer.get())
-        val tremor = int8ToFloat(outputBuffer.get())
-        return toResult(conf, tremor, windowSize)
-    }
+        // (b) Pitch 정상 범위 유지율: 발화 중 80~400Hz 범위 비율
+        val pitchInRange = validPitches.count { it in PITCH_MIN_NORMAL..PITCH_MAX_NORMAL }
+        val pitchRangeScore = (pitchInRange.toFloat() / validPitches.size).coerceIn(0f, 1f)
 
-    private fun floatToInt8(f: Float): Byte =
-        (f * 127f).toInt().coerceIn(-128, 127).toByte()
+        // (c) 발화 밀도: 묵음이 적을수록 자신감 있게 말하고 있음
+        val silenceRatio  = (pitchArray.count { it < 0 }.toFloat() / windowSize).coerceIn(0f, 1f)
+        val densityScore  = 1f - silenceRatio
 
-    private fun int8ToFloat(b: Byte): Float =
-        (b.toInt() / 127f).coerceIn(0f, 1f)
+        // (d) 떨림이 심하면 자신감도 낮게 반영
+        val tremorPenalty = rawTremor * 0.4f
 
-    private fun toResult(conf: Float, tremor: Float, windowSize: Int) = VoiceAnalysisResult(
-        confidencePercent = (conf   * 100).toInt().coerceIn(0, 100),
-        tremorPercent     = (tremor * 100).toInt().coerceIn(0, 100),
-        isReliable        = windowSize >= 10
-    )
+        // 자신감 = 볼륨안정성*30% + Pitch범위*30% + 발화밀도*40% - 떨림페널티
+        val rawConfidence = (rmsStability * 0.3f +
+                             pitchRangeScore * 0.3f +
+                             densityScore * 0.4f) - tremorPenalty
+        val confidencePercent = (rawConfidence * 100).toInt().coerceIn(0, 100)
 
-    // ── 정규화 ────────────────────────────────────────────────────
-    private fun normalizeRms(db: Float): Float   = ((db + 60f) / 50f).coerceIn(0f, 1f)
-    private fun normalizePitch(hz: Float): Float =
-        if (hz < 0) 0f else ((hz - 80f) / 320f).coerceIn(0f, 1f)
-
-    private fun loadModelFile(): MappedByteBuffer {
-        val assetFd     = context.assets.openFd(MODEL_FILENAME)
-        val inputStream = FileInputStream(assetFd.fileDescriptor)
-        return inputStream.channel.map(
-            FileChannel.MapMode.READ_ONLY,
-            assetFd.startOffset,
-            assetFd.declaredLength
+        return VoiceAnalysisResult(
+            confidencePercent = confidencePercent,
+            tremorPercent     = tremorPercent,
+            isReliable        = windowSize >= 5,
+            // 디버그용 세부 지표
+            pitchStd          = pitchStd,
+            jitter            = jitter,
+            baselineStd       = baselineStd
         )
     }
 
-    fun close() {
-        interpreter?.close()
-        interpreter = null
+    // ── 표준편차 계산 ─────────────────────────────────────────────
+    private fun standardDeviation(values: List<Float>): Float {
+        if (values.size < 2) return 0f
+        val mean     = values.average().toFloat()
+        val variance = values.sumOf { ((it - mean) * (it - mean)).toDouble() } / values.size
+        return sqrt(variance).toFloat()
     }
+
+    // TFLite 시절 호환용 (아무것도 안 함)
+    fun close() {}
 }
 
+// ── 결과 데이터 클래스 ────────────────────────────────────────────
 data class VoiceAnalysisResult(
     val confidencePercent: Int,
     val tremorPercent:     Int,
-    val isReliable:        Boolean
+    val isReliable:        Boolean,
+    // 세부 지표 (리포트 디버그용)
+    val pitchStd:          Float = 0f,
+    val jitter:            Float = 0f,
+    val baselineStd:       Float = 0f
 ) {
-    companion object { fun empty() = VoiceAnalysisResult(0, 0, false) }
-    val isTremorHigh:    Boolean get() = tremorPercent    >= 60
+    companion object {
+        fun empty() = VoiceAnalysisResult(0, 0, false)
+    }
+
+    val isTremorHigh:    Boolean get() = tremorPercent     >= 60
     val isConfidenceLow: Boolean get() = confidencePercent <= 40
+
+    /** 떨림 심각도 레이블 */
+    val tremorLabel: String get() = when {
+        tremorPercent >= 70 -> "심함"
+        tremorPercent >= 40 -> "경미"
+        else                -> "안정"
+    }
 }

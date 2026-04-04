@@ -1,87 +1,103 @@
 package com.speechcoach.stt
 
 import com.speechcoach.audio.AudioConfig
-import kotlinx.coroutines.*
 
 /**
- * SpeedAnalyzer (Track 1 - 실시간 HUD용)
+ * SpeedAnalyzer
  *
- * VOSK에서 나오는 단어 스트림을 받아
- * 슬라이딩 윈도우(기본 7초) 기준으로 WPM(분당 단어 수)을 계산한다.
+ * onPartialText()는 SpeechRecognizer의 누적 텍스트를 받으므로
+ * 이전 partial과 비교해 새로 추가된 단어만 WPM에 카운트한다.
  *
- * 결과에 따라 3단계 속도 상태를 반환:
- * NORMAL  → 테두리 초록색 (유지)
- * FAST    → 테두리 주황색 깜빡임 (빠름 경고)
- * SLOW    → 테두리 파란색 (느림 안내)
+ * onFinalText()는 확정된 문장을 받으며 partial 버퍼를 초기화한다.
  */
 class SpeedAnalyzer {
 
     enum class SpeedState { NORMAL, FAST, SLOW }
 
     data class SpeedResult(
-        val wpm:        Int,        // 현재 WPM
-        val state:      SpeedState, // 속도 상태
-        val windowSec:  Int         // 분석 윈도우 (초)
+        val wpm: Int,
+        val state: SpeedState,
+        val windowSec: Int
     )
 
-    // ── 슬라이딩 윈도우 버퍼 ─────────────────────────────────────
-    // Pair<단어, 타임스탬프(초)> 를 저장
-    private val wordBuffer = ArrayDeque<Pair<String, Double>>()
+    private val WINDOW_SEC = 3
 
-    // ── 전체 발표 WPM 기록 (리포트 그래프용) ────────────────────
-    // Pair<시각(초), WPM>
+    // 실제 WPM 계산용: (단어, 수신시각ms)
+    private val wordBuffer = ArrayDeque<Pair<String, Long>>()
     private val wpmHistory = mutableListOf<Pair<Double, Int>>()
 
-    private var lastCalcTime = 0.0
+    private var startTimeMs = 0L
+    private var lastCalcMs = 0L
 
-    /**
-     * 새 단어 배열을 버퍼에 추가하고 WPM을 계산한다.
-     *
-     * @param words VOSK VoskWord 리스트
-     * @return SpeedResult (현재 속도 상태)
-     */
-    fun onNewWords(words: List<VoskWord>): SpeedResult {
-        val now = words.lastOrNull()?.end ?: return SpeedResult(0, SpeedState.NORMAL, AudioConfig.SPEED_WINDOW_SEC)
-
-        // 버퍼에 추가
-        words.forEach { wordBuffer.addLast(Pair(it.word, it.end)) }
-
-        // 윈도우 바깥 단어 제거 (슬라이딩)
-        val windowStart = now - AudioConfig.SPEED_WINDOW_SEC
-        while (wordBuffer.isNotEmpty() && wordBuffer.first().second < windowStart) {
-            wordBuffer.removeFirst()
-        }
-
-        // WPM 계산: (윈도우 내 단어 수 / 윈도우 초) × 60
-        val windowWordCount = wordBuffer.size
-        val wpm = if (AudioConfig.SPEED_WINDOW_SEC > 0) {
-            (windowWordCount.toDouble() / AudioConfig.SPEED_WINDOW_SEC * 60).toInt()
-        } else 0
-
-        // 히스토리 저장 (1초 간격으로)
-        if (now - lastCalcTime >= 1.0) {
-            wpmHistory.add(Pair(now, wpm))
-            lastCalcTime = now
-        }
-
-        val state = when {
-            wpm >= AudioConfig.SPEED_FAST_WPM -> SpeedState.FAST
-            wpm <= AudioConfig.SPEED_SLOW_WPM && wpm > 0 -> SpeedState.SLOW
-            else -> SpeedState.NORMAL
-        }
-
-        return SpeedResult(wpm, state, AudioConfig.SPEED_WINDOW_SEC)
-    }
-
-    /**
-     * 전체 발표 WPM 히스토리 반환 (발표 종료 후 그래프용)
-     * @return List<Pair<시각(초), WPM>>
-     */
-    fun getWpmHistory(): List<Pair<Double, Int>> = wpmHistory.toList()
+    // partial 중복 방지용: 이전 partial 단어 수
+    private var lastPartialWordCount = 0
 
     fun reset() {
         wordBuffer.clear()
         wpmHistory.clear()
-        lastCalcTime = 0.0
+        startTimeMs = System.currentTimeMillis()
+        lastCalcMs = startTimeMs
+        lastPartialWordCount = 0
     }
+
+    /**
+     * VOSK partial/final 텍스트 수신 시 호출
+     * isFinal=true이면 중복 방지 카운터 초기화
+     */
+    fun onPartialText(text: String, nowMs: Long, isFinal: Boolean = false): SpeedResult {
+        val allWords = text.trim().split("\\s+".toRegex()).filter { it.isNotEmpty() }
+
+        // 새로 추가된 단어만 추출 (중복 카운팅 방지)
+        val newWords = if (isFinal) {
+            // 확정 결과: partial 카운터 리셋 후 전체 단어 사용
+            lastPartialWordCount = 0
+            allWords
+        } else {
+            // partial: 이전 partial보다 늘어난 단어만
+            val newCount = allWords.size - lastPartialWordCount
+            lastPartialWordCount = allWords.size
+            if (newCount <= 0) return getLastResult(nowMs)
+            allWords.takeLast(newCount)
+        }
+
+        if (newWords.isEmpty()) return getLastResult(nowMs)
+
+        // 슬라이딩 윈도우에 추가
+        newWords.forEach { wordBuffer.addLast(Pair(it, nowMs)) }
+
+        // 윈도우 밖 제거
+        val cutMs = nowMs - WINDOW_SEC * 1000L
+        while (wordBuffer.isNotEmpty() && wordBuffer.first().second < cutMs) {
+            wordBuffer.removeFirst()
+        }
+
+        val wpm = (wordBuffer.size.toDouble() / WINDOW_SEC * 60).toInt()
+
+        // 1초 간격 히스토리
+        if (nowMs - lastCalcMs >= 1000L) {
+            val elapsed = (nowMs - startTimeMs) / 1000.0
+            wpmHistory.add(Pair(elapsed, wpm))
+            lastCalcMs = nowMs
+        }
+
+        val state = when {
+            wpm >= AudioConfig.SPEED_FAST_WPM -> SpeedState.FAST
+            wpm in 1 until AudioConfig.SPEED_SLOW_WPM -> SpeedState.SLOW
+            else -> SpeedState.NORMAL
+        }
+
+        return SpeedResult(wpm, state, WINDOW_SEC)
+    }
+
+    private fun getLastResult(nowMs: Long): SpeedResult {
+        val wpm = if (wpmHistory.isNotEmpty()) wpmHistory.last().second else 0
+        val state = when {
+            wpm >= AudioConfig.SPEED_FAST_WPM -> SpeedState.FAST
+            wpm in 1 until AudioConfig.SPEED_SLOW_WPM -> SpeedState.SLOW
+            else -> SpeedState.NORMAL
+        }
+        return SpeedResult(wpm, state, WINDOW_SEC)
+    }
+
+    fun getWpmHistory(): List<Pair<Double, Int>> = wpmHistory.toList()
 }

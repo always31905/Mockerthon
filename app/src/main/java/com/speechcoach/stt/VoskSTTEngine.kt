@@ -12,164 +12,115 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * VoskSTTEngine
+ * VoskSTTEngine - 실시간 WPM 계산 전용
  *
- * [크래시 수정]
- * getFinalTranscript()를 STT 코루틴이 살아있는 상태에서 호출하면
- * Recognizer를 두 스레드가 동시에 접근해 메모리 손상(SIGABRT) 발생.
+ * 역할: AudioBroadcaster PCM 청크 → 단어 인식 → SpeedAnalyzer에 전달
+ * 스크립트/습관어는 담당하지 않음 (발표 종료 후 PostSpeechProcessor가 담당)
  *
- * 해결: stopAndGetTranscript() 함수를 추가.
- *   1. sttJob.cancelAndJoin() → 코루틴이 완전히 종료될 때까지 대기
- *   2. 단일 스레드에서 recognizer.finalResult 안전하게 접근
- *   3. Recognizer/Model 해제
- *
- * 반드시 IO 스레드(Dispatchers.IO)에서 호출해야 한다.
- * (suspend 함수이므로 코루틴 안에서 호출)
+ * VOSK는 PCM을 직접 받으므로 AudioRecord와 마이크 충돌 없음.
  */
 class VoskSTTEngine(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
     companion object {
-        private const val TAG             = "VoskSTTEngine"
+        private const val TAG = "VoskSTTEngine"
         private const val MODEL_ASSET_DIR = "vosk-model-small-ko"
+        private const val SAMPLE_RATE = 16000f
+        // 400ms 청크 (인식률 개선)
+        private const val CHUNK_SAMPLES = 6400
     }
 
-    private var model:      Model?      = null
+    // WPM용 콜백: 인식된 텍스트 + 수신 시각
+    var onSpeedUpdate: ((String, Long) -> Unit)? = null
+
+    private var model: Model? = null
     private var recognizer: Recognizer? = null
     private val gson = Gson()
-
-    var onPartialResult: ((String) -> Unit)?        = null
-    var onWordResult:    ((List<VoskWord>) -> Unit)? = null
-
     private var sttJob: Job? = null
-    private val fullTranscript = StringBuilder()
+    private val accumulator = mutableListOf<Short>()
 
-    // ── 모델 초기화 ───────────────────────────────────────────────
     fun initialize(onReady: () -> Unit, onError: (String) -> Unit) {
         scope.launch(Dispatchers.IO) {
             try {
-                val modelDir   = copyModelFromAssets()
+                val modelDir = copyModelFromAssets()
                 val loadedModel = Model(modelDir.absolutePath)
-                model      = loadedModel
-                recognizer = Recognizer(loadedModel, 16000f).also { it.setWords(true) }
-                Log.d(TAG, "VOSK 모델 로드 완료: ${modelDir.absolutePath}")
+                model = loadedModel
+                recognizer = Recognizer(loadedModel, SAMPLE_RATE).also {
+                    it.setWords(true)
+                }
+                Log.d(TAG, "VOSK 초기화 완료")
                 withContext(Dispatchers.Main) { onReady() }
             } catch (e: Exception) {
-                Log.e(TAG, "VOSK 모델 로드 실패: ${e.message}")
+                Log.e(TAG, "VOSK 초기화 실패: ${e.message}")
                 withContext(Dispatchers.Main) { onError(e.message ?: "모델 로드 실패") }
             }
         }
     }
 
-    // ── STT 스트리밍 시작 ─────────────────────────────────────────
     fun startListening(audioChunkFlow: SharedFlow<ShortArray>) {
         sttJob = scope.launch(Dispatchers.IO) {
-            audioChunkFlow.collect { chunk -> processChunk(chunk) }
+            audioChunkFlow.collect { chunk ->
+                accumulator.addAll(chunk.toList())
+                while (accumulator.size >= CHUNK_SAMPLES) {
+                    val batch = accumulator.subList(0, CHUNK_SAMPLES).toShortArray()
+                    accumulator.subList(0, CHUNK_SAMPLES).clear()
+                    processChunk(batch)
+                }
+            }
         }
     }
 
-    // ── 청크 처리 ────────────────────────────────────────────────
     private suspend fun processChunk(chunk: ShortArray) {
-        val rec   = recognizer ?: return
+        val rec = recognizer ?: return
         val bytes = shortToByteArray(chunk)
+        val nowMs = System.currentTimeMillis()
+
         if (rec.acceptWaveForm(bytes, bytes.size)) {
-            parseAndEmitResult(rec.result)
+            val json = rec.result
+            parseForSpeed(json, nowMs)
         } else {
-            val partial = gson.fromJson(rec.partialResult, JsonObject::class.java)
-                .get("partial")?.asString ?: ""
-            if (partial.isNotEmpty()) {
-                withContext(Dispatchers.Main) { onPartialResult?.invoke(partial) }
-            }
+            // partial도 WPM에 활용
+            val partialJson = rec.partialResult
+            try {
+                val partial = gson.fromJson(partialJson, JsonObject::class.java)
+                    .get("partial")?.asString ?: ""
+                if (partial.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        onSpeedUpdate?.invoke(partial, nowMs)
+                    }
+                }
+            } catch (e: Exception) { }
         }
     }
 
-    private suspend fun parseAndEmitResult(json: String) {
+    private suspend fun parseForSpeed(json: String, nowMs: Long) {
         try {
-            val obj  = gson.fromJson(json, JsonObject::class.java)
-            val text = obj.get("text")?.asString ?: return
-            if (text.isEmpty()) return
-            fullTranscript.append(text).append(" ")
-            val words = mutableListOf<VoskWord>()
-            obj.getAsJsonArray("result")?.forEach { elem ->
-                val w = elem.asJsonObject
-                words.add(VoskWord(
-                    word  = w.get("word").asString,
-                    start = w.get("start").asDouble,
-                    end   = w.get("end").asDouble,
-                    conf  = w.get("conf").asDouble
-                ))
-            }
+            val text = gson.fromJson(json, JsonObject::class.java)
+                .get("text")?.asString ?: return
+            if (text.isBlank()) return
             withContext(Dispatchers.Main) {
-                onWordResult?.invoke(words)
-                onPartialResult?.invoke(text)
+                onSpeedUpdate?.invoke(text, nowMs)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "JSON 파싱 오류: ${e.message}")
-        }
+        } catch (e: Exception) { }
     }
 
-    // ════════════════════════════════════════════════════════════
-    // [핵심 수정] STT 코루틴을 완전히 종료한 뒤 finalResult 접근
-    //
-    // 반드시 IO 스레드에서 호출 (suspend)
-    // PresentationViewModel.stopPresentation()의 IO 코루틴 안에서 호출
-    // ════════════════════════════════════════════════════════════
-    suspend fun stopAndGetTranscript(): String {
-        // 1. STT 코루틴 취소 + 완전 종료 대기
-        //    cancelAndJoin(): cancel() 후 Job이 Completed 상태가 될 때까지 suspend
+    suspend fun stop() {
         sttJob?.cancelAndJoin()
         sttJob = null
-        Log.d(TAG, "STT 코루틴 완전 종료 확인")
-
-        // 2. 이 시점에는 processChunk()가 실행 중이지 않으므로
-        //    Recognizer 단독 접근 보장 → 안전하게 finalResult 호출
-        val finalJson = try {
-            recognizer?.finalResult ?: ""
-        } catch (e: Exception) {
-            Log.e(TAG, "finalResult 접근 오류: ${e.message}")
-            ""
-        }
-
-        // 3. 마지막 미처리 텍스트 추가
-        try {
-            val obj      = gson.fromJson(finalJson, JsonObject::class.java)
-            val lastText = obj.get("text")?.asString ?: ""
-            if (lastText.isNotEmpty()) fullTranscript.append(lastText)
-        } catch (e: Exception) { /* JSON 파싱 실패 무시 */ }
-
-        val transcript = fullTranscript.toString().trim()
-        Log.d(TAG, "최종 전사 완료: ${transcript.length}자")
-
-        // 4. Recognizer/Model 해제 (finalResult 호출 이후에 해제해야 안전)
         recognizer?.close()
         model?.close()
         recognizer = null
-        model       = null
-
-        return transcript
+        model = null
+        accumulator.clear()
+        Log.d(TAG, "VOSK 중지 완료")
     }
 
-    // 기존 stop() - onCleared()에서 비상 정리용으로만 사용
-    fun stop() {
-        sttJob?.cancel()
-        sttJob = null
-        recognizer?.close()
-        model?.close()
-        recognizer = null
-        model       = null
-    }
-
-    // ── assets → filesDir 복사 ────────────────────────────────────
     private fun copyModelFromAssets(): File {
         val destDir = File(context.filesDir, MODEL_ASSET_DIR)
-        if (destDir.exists() && destDir.list()?.isNotEmpty() == true) {
-            Log.d(TAG, "모델 이미 존재, 복사 스킵")
-            return destDir
-        }
+        if (destDir.exists() && destDir.list()?.isNotEmpty() == true) return destDir
         destDir.mkdirs()
         copyAssetFolder(MODEL_ASSET_DIR, destDir)
-        Log.d(TAG, "모델 복사 완료")
         return destDir
     }
 
@@ -190,16 +141,9 @@ class VoskSTTEngine(
     private fun shortToByteArray(shorts: ShortArray): ByteArray {
         val bytes = ByteArray(shorts.size * 2)
         for (i in shorts.indices) {
-            bytes[i * 2]     = (shorts[i].toInt() and 0xFF).toByte()
+            bytes[i * 2] = (shorts[i].toInt() and 0xFF).toByte()
             bytes[i * 2 + 1] = (shorts[i].toInt() shr 8).toByte()
         }
         return bytes
     }
 }
-
-data class VoskWord(
-    val word:  String,
-    val start: Double,
-    val end:   Double,
-    val conf:  Double
-)
