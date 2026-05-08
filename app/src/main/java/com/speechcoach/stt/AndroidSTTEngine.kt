@@ -12,7 +12,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-
+/*
 class AndroidSTTEngine(
     private val context: Context,
     private val scope: CoroutineScope
@@ -184,3 +184,4 @@ data class SpeechWord(
     val end: Double,
     val conf: Double = 1.0
 )
+*/

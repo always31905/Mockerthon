@@ -19,3 +19,4 @@ __pycache__/
 .cxx
 local.properties
 app/src/main/assets/vosk-model-small-ko/
+app/src/main/assets/ggml-*.bin
