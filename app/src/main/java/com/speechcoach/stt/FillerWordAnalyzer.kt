@@ -26,7 +26,7 @@ class FillerWordAnalyzer {
         FillerEntry("좀",         "(?<!\\S)좀(?!\\S)")
     )
 
-    fun analyze(fullText: String, allWords: List<SpeechWord>): FillerAnalysisResult {
+    fun analyze(fullText: String, segments: List<SpeechSegment>): FillerAnalysisResult {
         val breakdown = mutableMapOf<String, FillerDetail>()
 
         fillerEntries.forEach { entry ->
@@ -34,8 +34,9 @@ class FillerWordAnalyzer {
             val matches = regex.findAll(fullText).toList()
             if (matches.isEmpty()) return@forEach
 
-            val timestamps = allWords
-                .filter { Regex(entry.pattern, RegexOption.IGNORE_CASE).containsMatchIn(it.word) }
+            // 💡 문장 내에 습관어가 포함되어 있으면 해당 문장의 시작 시간을 타임스탬프로 사용
+            val timestamps = segments
+                .filter { regex.containsMatchIn(it.text) }
                 .map { it.start }
 
             breakdown[entry.displayName] = FillerDetail(
