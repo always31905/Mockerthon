@@ -1,6 +1,5 @@
 package com.speechcoach.stt
 
-// 1. 설정 및 데이터 클래스
 object WhisperConfig {
     const val SAMPLE_RATE = 16000
     const val N_FFT = 400
@@ -10,7 +9,6 @@ object WhisperConfig {
     const val N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
     const val N_FRAMES = N_SAMPLES / HOP_LENGTH // 3000
 
-    // Whisper Special Tokens (Multilingual 모델 기준)
     const val SOT = 50258
     const val KO_TOKEN = 50264
     const val TRANSCRIBE = 50359
