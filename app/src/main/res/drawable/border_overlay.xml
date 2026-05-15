@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  border_overlay.xml
+  HUD 화면에서 FAST(빠름) 상태일 때 주황색 테두리로 깜빡이는 오버레이.
+  PresentationActivity에서 ObjectAnimator로 alpha를 0↔1 애니메이션.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <stroke
+        android:width="8dp"
+        android:color="#FF9800" />
+
+    <!-- 내부는 완전 투명 -->
+    <solid android:color="#00000000" />
+</shape>

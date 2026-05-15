@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SpeechCoach</string>
+    <string name="btn_start">발표 시작</string>
+    <string name="btn_stop">발표 종료</string>
+    <string name="btn_calibrate">기준 목소리 설정</string>
+    <string name="status_ready">발표 준비 완료</string>
+    <string name="status_recording">녹음 중...</string>
+    <string name="status_analyzing">분석 중...</string>
+    <string name="speed_fast">빠름 ⚡</string>
+    <string name="speed_slow">느림 🐢</string>
+    <string name="speed_normal">정상 ✅</string>
+    <string name="report_title">발표 분석 리포트</string>
+    <string name="permission_mic_rationale">실시간 발표 분석을 위해 마이크 권한이 필요합니다.</string>
+</resources>
