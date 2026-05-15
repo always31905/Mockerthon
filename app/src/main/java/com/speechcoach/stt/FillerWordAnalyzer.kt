@@ -37,7 +37,7 @@ class FillerWordAnalyzer {
             // 💡 문장 내에 습관어가 포함되어 있으면 해당 문장의 시작 시간을 타임스탬프로 사용
             val timestamps = segments
                 .filter { regex.containsMatchIn(it.text) }
-                .map { it.start }
+                .map { it.start }.map{it.toDouble()}
 
             breakdown[entry.displayName] = FillerDetail(
                 count = matches.size,
