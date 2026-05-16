@@ -59,7 +59,8 @@ class CalibrationActivity : AppCompatActivity() {
         // 녹음 시작 버튼
         binding.btnStartCalib.setOnClickListener {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED) startCalibration()
+                == PackageManager.PERMISSION_GRANTED
+            ) startCalibration()
             else requestPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
 
@@ -73,11 +74,11 @@ class CalibrationActivity : AppCompatActivity() {
         if (isRecording) return
         isRecording = true
 
-        binding.btnStartCalib.isEnabled    = false
-        binding.btnFinishEarly.visibility  = View.VISIBLE   // 완료 버튼 표시
-        binding.tvGuide.text               = "위 글을 자연스럽게 읽어주세요..."
-        binding.progressBar.visibility     = View.VISIBLE
-        binding.progressBar.max            = 100
+        binding.btnStartCalib.isEnabled = false
+        binding.btnFinishEarly.visibility = View.VISIBLE   // 완료 버튼 표시
+        binding.tvGuide.text = "위 글을 자연스럽게 읽어주세요..."
+        binding.progressBar.visibility = View.VISIBLE
+        binding.progressBar.max = 100
 
         val pcmPath = "${filesDir.absolutePath}/calib_temp.pcm"
         broadcaster = AudioBroadcaster(pcmPath, calibScope).also { it.start() }
@@ -91,9 +92,10 @@ class CalibrationActivity : AppCompatActivity() {
         countDownTimer = object : CountDownTimer(30_000, 1000) {
             override fun onTick(ms: Long) {
                 val elapsed = 30 - (ms / 1000).toInt()
-                binding.tvTimer.text       = "남은 시간: ${ms / 1000}초"
+                binding.tvTimer.text = "남은 시간: ${ms / 1000}초"
                 binding.progressBar.progress = (elapsed * 100 / 30)
             }
+
             override fun onFinish() {
                 finishCalibration()
             }
@@ -109,25 +111,24 @@ class CalibrationActivity : AppCompatActivity() {
         tarsosAnalyzer?.stop()
 
         binding.btnFinishEarly.visibility = View.GONE
-        binding.progressBar.visibility    = View.GONE
-        binding.tvTimer.text              = ""
+        binding.progressBar.visibility = View.GONE
+        binding.tvTimer.text = ""
 
         val result = calibManager.finishCalibration()
         if (result.success) {
+            // 1. [핵심 수정] 녹음 시작 버튼을 아예 없애버림
+            binding.btnStartCalib.visibility = View.GONE
+
             binding.tvGuide.text = "✅ 캘리브레이션 완료!\n" +
                     "평균 볼륨: ${String.format("%.1f", result.avgRmsDb)} dB\n" +
                     "평균 음높이: ${String.format("%.1f", result.avgPitchHz)} Hz\n\n" +
-                    "이제 발표 화면으로 돌아가 발표를 시작하세요."
-        } else {
-            binding.tvGuide.text       = "❌ 데이터가 부족합니다. 최소 5초 이상 읽어주세요."
-            binding.btnStartCalib.isEnabled = true
-        }
-    }
+                    "목소리 설정이 저장되었습니다.\n 뒤로가기 버튼을 눌러 발표를 시작하세요!"
 
-    override fun onDestroy() {
-        countDownTimer?.cancel()
-        broadcaster?.stop()
-        tarsosAnalyzer?.stop()
-        super.onDestroy()
+        } else {
+            // 데이터 부족 시에는 다시 시도할 수 있게 버튼을 유지함
+            binding.tvGuide.text = "❌ 데이터가 부족합니다. 최소 5초 이상 읽어주세요."
+            binding.btnStartCalib.isEnabled = true
+            binding.btnStartCalib.visibility = View.VISIBLE
+        }
     }
 }
