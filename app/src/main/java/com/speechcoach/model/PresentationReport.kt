@@ -84,6 +84,9 @@ object ReportBuilder {
             volumeHistory        = volumeHistory.map { listOf(it.first.toDouble(), it.second.toDouble()) }
         )
 
+        val score    = calcScore(speedReport, fillerReport, voiceReport)
+        val feedback = generateFeedback(speedReport, fillerReport, voiceReport)
+
         return PresentationReport(
             presentationId = "pres_${System.currentTimeMillis()}",
             durationSec    = durationSec,
@@ -93,8 +96,8 @@ object ReportBuilder {
             speedAnalysis  = speedReport,
             fillerAnalysis = fillerReport,
             voiceAnalysis  = voiceReport,
-            overallScore   = 85, // 임시
-            aiFeedback     = "분석 완료"
+            overallScore   = score, // 임시
+            aiFeedback     = feedback
         )
     }
 
@@ -112,4 +115,27 @@ object ReportBuilder {
         results.mapIndexedNotNull { i, r ->
             if (r.tremorPercent >= 60) TimedSection(i * 3.0, i * 3.0 + 3.0, r.tremorPercent) else null
         }
+
+    private fun calcScore(s: SpeedAnalysisReport, f: FillerAnalysisReport, v: VoiceAnalysisReport): Int {
+        var score = 100
+        score -= (f.fillerRatePercent * 2).toInt().coerceAtMost(30)
+        score -= (s.fastSections.size * 3).coerceAtMost(20)
+        score -= (v.avgTremorPercent / 5).coerceAtMost(20)
+        return score.coerceIn(0, 100)
+    }
+
+    private fun generateFeedback(s: SpeedAnalysisReport, f: FillerAnalysisReport, v: VoiceAnalysisReport): String {
+        val sb = StringBuilder()
+        if (f.fillerRatePercent >= 5.0)
+            sb.appendLine("💬 불필요한 단어(습관어) 사용이 전체의 ${String.format("%.1f", f.fillerRatePercent)}%입니다.")
+        if (s.fastSections.isNotEmpty())
+            sb.appendLine("⚡ 말이 빨라지는 구간이 ${s.fastSections.size}번 감지됐습니다. 의식적으로 속도를 늦춰보세요.")
+        if (v.avgTremorPercent >= 50)
+            sb.appendLine("🎙️ 목소리 떨림이 감지됐습니다. 발표 전 심호흡을 권장합니다.")
+        if (v.avgConfidencePercent >= 70)
+            sb.appendLine("✅ 전반적으로 자신감 있는 목소리를 유지했습니다!")
+        if (sb.isEmpty())
+            sb.appendLine("✅ 훌륭한 발표였습니다! 페이스, 습관어, 목소리 모두 양호합니다.")
+        return sb.toString().trim()
+    }
 }
