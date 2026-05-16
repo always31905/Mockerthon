@@ -21,15 +21,6 @@ android {
         }
     }
 
-    // 1-2. CMakeLists.txt 경로 연결 (매우 중요!)
-    externalNativeBuild {
-        cmake {
-            // CMakeLists.txt 파일이 있는 실제 경로로 맞춰주세요.
-            // 보통 src/main/cpp/CMakeLists.txt 에 위치합니다.
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
 
     buildTypes {
         release {
